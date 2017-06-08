@@ -1,0 +1,250 @@
+<?xml version="1.0"?>
+<project name="integration-tests" xmlns:if="ant:if" xmlns:unless="ant:unless">
+    <!-- our pid file for easy cleanup -->
+    <property name="integ.pidfile" location="${project.build.directory}/integration-tests/run/mongodb.pid"/>
+    <property name="integ.data" location="${project.build.directory}/integration-tests/run/mongodb-${mongodb.version}/data"/>
+
+    <property name="download.url.windows" value="http://downloads.mongodb.org/win32/mongodb-win32-x86_64-2008plus-ssl-3.4.2.zip"/>
+    <property name="download.url.unix" value="https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-amazon-3.4.2.tgz"/>
+    <property name="download.url.osx" value="https://fastdl.mongodb.org/osx/mongodb-osx-ssl-x86_64-3.4.2.tgz"/>
+
+    <!-- if this exists, ES is running (maybe) -->
+    <available property="integ.pidfile.exists" file="${integ.pidfile}"/>
+
+    <condition property="is_windows">
+        <os family="windows"/>
+    </condition>
+
+    <condition property="is_unix">
+        <and>
+            <os family="unix"/>
+            <not>
+                <os family="mac"/>
+            </not>
+        </and>
+    </condition>
+
+    <condition property="is_osx">
+        <os family="mac"/>
+    </condition>
+
+    <!-- runs mongod -->
+    <macrodef name="run-mongo">
+        <attribute name="spawn" default="false"/>
+        <element name="nested" optional="true"/>
+        <sequential>
+            <local name="failonerror"/>
+            <condition property="failonerror">
+                <isfalse value="@{spawn}"/>
+            </condition>
+
+            <echoxml><exec executable="mongod"><nested/></exec></echoxml>
+            <exec executable="mongod" dir="${project.build.directory}/integration-tests/run/mongodb-${mongodb.version}/bin" failonerror="${failonerror}" spawn="@{spawn}">
+                <nested/>
+            </exec>
+        </sequential>
+    </macrodef>
+
+    <!-- extracts PID from file -->
+    <macrodef name="extract-pid">
+        <attribute name="file"/>
+        <attribute name="property"/>
+        <sequential>
+            <loadfile srcFile="@{file}" property="@{property}">
+                <filterchain>
+                    <striplinebreaks/>
+                </filterchain>
+            </loadfile>
+        </sequential>
+    </macrodef>
+
+    <!-- waits for mongodb to start -->
+    <macrodef name="waitfor-mongodb">
+        <attribute name="port"/>
+        <attribute name="timeoutproperty"/>
+        <sequential>
+            <echo>Waiting for mongodb to become available on port @{port}...</echo>
+            <waitfor maxwait="30" maxwaitunit="second"
+                     checkevery="500" checkeveryunit="millisecond"
+                     timeoutproperty="@{timeoutproperty}">
+                <http url="http://localhost:@{port}"/>
+            </waitfor>
+        </sequential>
+    </macrodef>
+
+    <!-- start mongodb and wait until its ready -->
+    <macrodef name="startup-mongodb">
+        <attribute name="home" default="${project.build.directory}/integration-tests/run/mongodb-${mongodb.version}"/>
+        <attribute name="mongodb.pidfile" default="${integ.pidfile}"/>
+        <attribute name="mongodb.port" default="${mongodb.integ.port}"/>
+        <attribute name="mongodb.data" default="${integ.data}"/>
+
+        <sequential>
+            <!-- http port is 1000 more than the configured mongod port -->
+            <math operation="+" operator1="@{mongodb.port}" operator2="1000" result="mongodb.http.port"/>
+            <!-- make sure no mongodb instance is currently running and listening on the port we need -->
+            <fail message="This test expects port ${mongodb.port} to be free but mongodb instance is already running and listening on that port.
+      Maybe the last test run did not manage to shut down the node correctly?
+      You must kill it before tests can run.">
+                <condition>
+                    <socket server="localhost" port="@{mongodb.port}"></socket>
+                </condition>
+            </fail>
+
+            <!-- run bin/mongod -->
+            <echo>Starting up external cluster...</echo>
+            <echo >running Mongodb</echo>
+
+            <!-- create data folder -->
+            <mkdir dir="@{mongodb.data}"/>
+            <!--user spawn to run mongod in background-->
+            <run-mongo spawn="true">
+                <nested>
+                    <arg value="--port=@{mongodb.port}"/>
+                    <arg value="--rest"/>
+                    <arg value="--dbpath=@{mongodb.data}"/>
+                    <arg value="--pidfilepath=@{mongodb.pidfile}"/>
+                </nested>
+            </run-mongo>
+
+            <!-- wait for startup -->
+            <local name="failed.to.start"/>
+            <waitfor-mongodb port="${mongodb.http.port}"
+                             timeoutproperty="failed.to.start"/>
+
+            <fail message="mongodb instance did not start" if="failed.to.start"/>
+            <local name="integ.pid"/>
+            <extract-pid file="@{mongodb.pidfile}" property="integ.pid"/>
+            <echo>External node started PID ${integ.pid}</echo>
+        </sequential>
+    </macrodef>
+
+    <!-- create macrodef -->
+    <macrodef name="math">
+        <attribute name="operation"/>
+        <attribute name="operator1"/>
+        <attribute name="operator2"/>
+        <attribute name="result"/>
+        <sequential>
+            <script language="javascript">
+                tmp = 0;
+                switch ("@{operation}")
+                {
+                case "+" :
+                tmp = parseInt("@{operator1}") + parseInt("@{operator2}");
+                break;
+                case "-" :
+                tmp = parseInt("@{operator1}") - parseInt("@{operator2}");
+                break;
+                case "*" :
+                tmp = parseInt("@{operator1}") * parseInt("@{operator2}");
+                break;
+                case "/" :
+                tmp = parseInt("@{operator1}") / parseInt("@{operator2}");
+                break;
+                }
+                project.setProperty("@{result}", tmp);
+            </script>
+        </sequential>
+    </macrodef>
+
+    <macrodef name="stop-node">
+        <attribute name="mongodb.pidfile" default="${integ.pidfile}"/>
+        <attribute name="mongodb.data" default="${integ.data}"/>
+        <!-- <attribute name="mongodb.log" default="${integ.log}"/> -->
+        <sequential>
+            <local name="integ.pid"/>
+
+            <extract-pid file="@{mongodb.pidfile}" property="integ.pid"/>
+            <echo>Shutting down external node PID ${integ.pid}</echo>
+            <exec executable="taskkill" failonerror="true" osfamily="winnt">
+                <arg value="/F"/>
+                <arg value="/PID"/>
+                <arg value="${integ.pid}"/>
+            </exec>
+            <exec executable="kill" failonerror="true" osfamily="unix">
+                <arg value="-9"/>
+                <arg value="${integ.pid}"/>
+            </exec>
+            <delete file="@{mongodb.pidfile}"/>
+            <delete dir="@{mongodb.data}"/>
+        </sequential>
+    </macrodef>
+
+    <macrodef name="download-mongodb-unix">
+        <sequential>
+            <get src="${download.url.unix}" dest="${project.build.directory}/integration-tests/binaries"/>
+            <move todir="${project.build.directory}/integration-tests/binaries" includeemptydirs="false">
+                <fileset dir="${project.build.directory}/integration-tests/binaries"/>
+                <mapper type="glob" from="*.tgz" to="mongodb-${mongodb.version}.tgz"/>
+            </move>
+            <gunzip  src="${project.build.directory}/integration-tests/binaries/mongodb-${mongodb.version}.tgz" dest="${project.build.directory}/integration-tests/binaries/mongodb-${mongodb.version}.tar"/>
+            <untar src="${project.build.directory}/integration-tests/binaries/mongodb-${mongodb.version}.tar" dest="${project.build.directory}/integration-tests/run/"/>
+            <dirset dir="${project.build.directory}/integration-tests/run" includes="mongodb*" id="mongo-home" />
+            <property name="mongo.home" refid="mongo-home"/>
+            <move file="${project.build.directory}/integration-tests/run/${mongo.home}" tofile="${project.build.directory}/integration-tests/run/mongodb-${mongodb.version}"/>
+        </sequential>
+    </macrodef>
+
+    <macrodef name="download-mongodb-windows">
+        <sequential>
+            <get src="${download.url.windows}" dest="${project.build.directory}/integration-tests/binaries"/>
+            <move todir="${project.build.directory}/integration-tests/binaries" includeemptydirs="false">
+                <fileset dir="${project.build.directory}/integration-tests/binaries"/>
+                <mapper type="glob" from="*.zip" to="mongodb-${mongodb.version}.zip"/>
+            </move>
+            <unzip src="${project.build.directory}/integration-tests/binaries/mongodb-${mongodb.version}.zip" dest="${project.build.directory}/integration-tests/run"/>
+            <dirset dir="${project.build.directory}/integration-tests/run" includes="mongodb*" id="mongo-home" />
+            <property name="mongo.home" refid="mongo-home"/>
+            <move file="${project.build.directory}/integration-tests/run/${mongo.home}" tofile="${project.build.directory}/integration-tests/run/mongodb-${mongodb.version}"/>
+        </sequential>
+    </macrodef>
+
+    <macrodef name="download-mongodb-osx">
+        <sequential>
+            <get src="${download.url.osx}" dest="${project.build.directory}/integration-tests/binaries"/>
+            <move todir="${project.build.directory}/integration-tests/binaries" includeemptydirs="false">
+                <fileset dir="${project.build.directory}/integration-tests/binaries"/>
+                <mapper type="glob" from="*.tgz" to="mongodb-${mongodb.version}.tgz"/>
+            </move>
+            <gunzip  src="${project.build.directory}/integration-tests/binaries/mongodb-${mongodb.version}.tgz" dest="${project.build.directory}/integration-tests/binaries/mongodb-${mongodb.version}.tar"/>
+            <untar src="${project.build.directory}/integration-tests/binaries/mongodb-${mongodb.version}.tar" dest="${project.build.directory}/integration-tests/run/"/>
+            <dirset dir="${project.build.directory}/integration-tests/run" includes="mongodb*" id="mongo-home" />
+            <property name="mongo.home" refid="mongo-home"/>
+            <move file="${project.build.directory}/integration-tests/run/${mongo.home}" tofile="${project.build.directory}/integration-tests/run/mongodb-${mongodb.version}"/>
+        </sequential>
+    </macrodef>
+
+    <macrodef name="download-mongodb">
+        <sequential if:true="${is_windows}">
+            <download-mongodb-windows/>
+        </sequential>
+        <sequential if:true="${is_unix}">
+            <download-mongodb-unix/>
+        </sequential>
+        <sequential if:true="${is_osx}">
+            <download-mongodb-osx/>
+        </sequential>
+    </macrodef>
+
+    <target name="stop-external-cluster" if="integ.pidfile.exists">
+        <stop-node/>
+    </target>
+
+    <target name="setup-workspace" depends="stop-external-cluster">
+        <sequential>
+            <echo>setting up workspace</echo>
+        </sequential>
+        <sequential>
+            <mkdir dir="${project.build.directory}/integration-tests/binaries"/>
+            <mkdir dir="${project.build.directory}/integration-tests/run"/>
+        </sequential>
+        <sequential>
+            <download-mongodb/>
+        </sequential>
+    </target>
+
+    <target name="start-external-cluster" depends="setup-workspace">
+        <startup-mongodb/>
+    </target>
+</project>
