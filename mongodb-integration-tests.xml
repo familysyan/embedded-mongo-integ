@@ -8,7 +8,7 @@
     <property name="download.url.unix" value="https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-amazon-3.4.2.tgz"/>
     <property name="download.url.osx" value="https://fastdl.mongodb.org/osx/mongodb-osx-ssl-x86_64-3.4.2.tgz"/>
 
-    <!-- if this exists, ES is running (maybe) -->
+    <!-- if this exists, Mongo is running (maybe) -->
     <available property="integ.pidfile.exists" file="${integ.pidfile}"/>
 
     <condition property="is_windows">
